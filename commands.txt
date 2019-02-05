@@ -1,0 +1,246 @@
+https://github.com/Azure/kubeflow-labs
+
+cd /datadrive/kubeflow-labs/4-kubeflow
+
+conda env create -f environment.yml
+source activate KubeflowEnv
+
+#TF-JOB:
+#cd 2-kubernetes
+
+DOCKER_USERNAME=fboylu
+docker build -t ${DOCKER_USERNAME}/tf-mnist:gpu -f Dockerfile.gpu .
+nvidia-docker run -it ${DOCKER_USERNAME}/tf-mnist:gpu
+docker push ${DOCKER_USERNAME}/tf-mnist:gpu
+
+#create AKS
+
+RESOURCE_GROUP_NAME=fboylukubeflowrg
+LOCATION=eastus
+
+az group create --name $RESOURCE_GROUP_NAME --location $LOCATION
+
+AGENT_SIZE=Standard_NC6
+AKS_NAME=fboylukubeflowaks
+AGENT_COUNT=1
+
+az aks create --node-vm-size $AGENT_SIZE --resource-group $RESOURCE_GROUP_NAME --name $AKS_NAME --node-count $AGENT_COUNT --kubernetes-version 1.11.4  --generate-ssh-keys
+
+sudo az aks install-cli
+
+az aks get-credentials --name $AKS_NAME --resource-group $RESOURCE_GROUP_NAME
+
+kubectl get nodes
+
+kubectl create -f https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v1.11/nvidia-device-plugin.yml
+
+kubectl describe node aks-nodepool1-17354647-0
+
+#run job
+
+kubectl create -f module2.yaml
+
+kubectl get job
+
+kubectl get pods
+
+kubectl logs module2-ex1-pvqn8
+
+
+#install KSONNET:
+
+wget https://github.com/ksonnet/ksonnet/releases/download/v0.13.1/ks_0.13.1_linux_amd64.tar.gz
+
+tar -zxvf  ks_0.13.1_linux_amd64.tar.gz 
+
+##need to do below every time new terminal is opened
+
+export PATH=$PATH:/datadrive/kubeflow-labs/ks_0.13.1_linux_amd64
+
+#INSTALL KUBEFLOW
+
+NAMESPACE=kubeflow
+kubectl create namespace ${NAMESPACE}
+
+VERSION=v0.4.0
+
+APP_NAME=my-kubeflow
+ks init ${APP_NAME}
+cd ${APP_NAME}
+ks env set default --namespace ${NAMESPACE}
+
+ks registry add kubeflow github.com/kubeflow/kubeflow/tree/${VERSION}/kubeflow
+
+ks pkg install kubeflow/common@${VERSION}
+-ks pkg install kubeflow/jupyter@${VERSION}
+ks pkg install kubeflow/tf-training@${VERSION}
+ks pkg install kubeflow/tf-serving@${VERSION}
+
+
+ks generate ambassador ambassador
+-ks generate jupyter jupyter
+ks generate tf-job-operator tf-job-operator
+-ks generate notebooks notebooks 
+ks generate centraldashboard centraldashboard
+
+ks param set tf-job-operator cloud aks
+
+ks generate tf-serving-service tf-serving-service
+ks generate tf-serving-deployment-gcp tf-serving-deployment
+
+ks param set tf-serving-service modelName half-plus-two
+ks param set tf-serving-service serviceType LoadBalancer
+
+ks param set tf-serving-deployment modelName half-plus-two
+-ks param set tf-serving-deployment modelBasePath /models/half_plus_two
+ks param set tf-serving-deployment modelBasePath /data
+ks param set tf-serving-deployment numGpus 1
+ks param set tf-serving-deployment defaultGpuImage fboylu/tf_serving_gpu
+-ks param set tf-serving-deployment serviceType LoadBalancer
+-ks param set tf-serving deployHttpProxy true
+
+ks apply default -c ambassador
+-ks apply default -c jupyter
+-ks apply default -c notebooks
+ks apply default -c centraldashboard
+ks apply default -c tf-job-operator
+
+ks apply default -c tf-serving-service
+ks apply default -c tf-serving-deployment
+
+
+!az aks scale --resource-group=$RESOURCE_GROUP_NAME --name=$AKS_NAME --node-count 2
+
+
+ks delete default -c tf-serving-deployment
+ks delete default -c tf-serving-service
+ks component list
+ks component rm tf-serving-deployment
+ks component rm tf-serving-service
+
+kubectl create -f module6.yaml
+kubectl get tfjob
+kubectl get pod
+kubectl logs <your-pod-name>
+
+# TROUBLESHOOT
+kubectl get pods -n kubeflow
+kubectl get svc -n kubeflow
+kubectl get crd -o yaml
+kubectl get pods -n kubeflow
+kubectl get events
+
+kubectl -n kubeflow exec -it tf-serving-deployment-8646bbc557-w87hx -- bash
+ks show default -c tf-serving-deployment
+kubectl get service -n kubeflow tf-serving-service --template="{{range .status.loadBalancer.ingress}}{{.ip}}{{end}}"
+kubectl logs -n kubeflow -f tf-serving-v1-5fc4f6f877-hj2d5 -c tf-serving
+kubectl describe -n kubeflow svc
+kubectl describe pods -n kubeflow
+
+
+
+TF SERVING:
+
+-docker pull tensorflow/serving:latest-gpu
+#docker file with port change, not needed any more, use the existing docker file -f Dockerfile.gpu
+docker build --pull -t fboylu/tensorflow-serving-gpu -f Dockerfile.gpu.port .
+
+# to commit servables into the image, not needed, model will be on blobfuse
+nvidia-docker run  -p 8000:8000 --mount type=bind,source=/datadrive/tfserving/serving/tensorflow_serving/servables/tensorflow/testdata/saved_model_half_plus_two_gpu,target=/models/half_plus_two -e MODEL_NAME=half_plus_two -t tensorflow/serving:latest-gpu 
+nvidia-docker run -d --name serving_base fboylu/tensorflow-serving-gpu
+docker cp servables/tensorflow/testdata/saved_model_half_plus_two_gpu/. serving_base:/models/half_plus_two
+docker commit --change "ENV MODEL_NAME half_plus_two" serving_base fboylu/tf_serving_gpu
+docker push fboylu/tf_serving_gpu
+
+nvidia-docker run  -p 8000:8000 -it fboylu/tf_serving_gpu
+
+curl -d '{"instances": [1.0, 2.0, 5.0]}' -X POST http://localhost:8000/v1/models/half_plus_two:predict
+curl -d '{"instances": [1.0, 2.0, 5.0]}' -X POST http://40.121.104.109:8500/v1/models/half-plus-two:predict
+
+
+# ATTACH BLOBFUSE to AKS
+https://github.com/Azure/Batch-Scoring-Deep-Learning-Models-With-AKS/blob/master/01_setup_azure.ipynb
+
+STORAGE_ACCOUNT_NAME=fboylukubeflowst
+az storage account create -n $STORAGE_ACCOUNT_NAME -g $RESOURCE_GROUP_NAME 
+
+az storage account keys list --account-name $STORAGE_ACCOUNT_NAME -g $RESOURCE_GROUP_NAME  --query '[0].value'
+
+STORAGE_ACCOUNT_KEY=gYXuCsOOzv74+w5/LpZpQNuaH5N32g4ZChN0zJckA5o9HKTXef+1Ur/mA4WcOv1RtY52EFTwbZSBJENyhtbxSw==
+STORAGE_CONTAINER_NAME=aks
+
+az storage container create --account-name $STORAGE_ACCOUNT_NAME --account-key $STORAGE_ACCOUNT_KEY --name $STORAGE_CONTAINER_NAME
+
+#upload model files to blob
+
+azcopy --source saved_model_half_plus_two_gpu --destination https://fboylukubeflowst.blob.core.windows.net/aks --dest-key $STORAGE_ACCOUNT_KEY --recursive
+
+https://github.com/Azure/kubernetes-volume-drivers/tree/master/flexvolume/blobfuse
+
+kubectl create -f https://raw.githubusercontent.com/Azure/kubernetes-volume-drivers/master/flexvolume/blobfuse/deployment/blobfuse-flexvol-installer-1.9.yaml
+
+kubectl describe daemonset blobfuse-flexvol-installer --namespace=flex
+
+watch kubectl get po --namespace=flex -o wide
+
+kubectl create secret generic blobfusecreds --from-literal accountname=$STORAGE_ACCOUNT_NAME --from-literal accountkey=$STORAGE_ACCOUNT_KEY --type="azure/blobfuse" --namespace=$NAMESPACE
+
+secret/blobfusecreds created
+
+# test not needed
+
+wget -O nginx-flex-blobfuse.yaml https://raw.githubusercontent.com/Azure/kubernetes-volume-drivers/master/flexvolume/blobfuse/nginx-flex-blobfuse.yaml
+
+modify container to aks
+
+kubectl create -f nginx-flex-blobfuse.yaml 
+kubectl exec -it nginx-flex-blobfuse -- bash 
+kubectl delete -f nginx-flex-blobfuse.yaml
+
+#Manually change the tf-serving-template.libsonnet created under vendor folder the app to add the following
+
+
+volumeMounts = [
+    {"name": "blob", "mountPath": /data},
+]
+
+volumes = [
+    {
+        "name": "blob",
+        "flexVolume": {
+            "driver": "azure/blobfuse",
+            "readOnly": False,
+            "secretRef": {"name": "blobfusecreds"},
+            "options": {
+                "container": aks,
+                "tmppath": "/tmp/blobfuse",
+                "mountoptions": "--file-cache-timeout-in-seconds=120 --use-https=true",
+            },
+        },
+    },
+]
+
+
+#Clean up
+
+az aks delete -n $AKS_NAME -g $RESOURCE_GROUP_NAME --yes
+
+
+az group delete --name $RESOURCE_GROUP_NAME -y
+
+
+TF SERVING_old:
+
+docker pull tensorflow/serving:latest-gpu
+
+nvidia-docker run  -p 8501:8501 --mount type=bind,source=/datadrive/tfserving/serving/tensorflow_serving/servables/tensorflow/testdata/saved_model_half_plus_two_gpu,target=/models/half_plus_two -e MODEL_NAME=half_plus_two -t tensorflow/serving:latest-gpu 
+
+curl -d '{"instances": [1.0, 2.0, 5.0]}' -X POST http://localhost:8501/v1/models/half_plus_two:predict
+
+nvidia-docker run -d --name serving_base tensorflow/serving:latest-gpu
+docker cp serving/tensorflow_serving/servables/tensorflow/testdata/saved_model_half_plus_two_gpu/. serving_base:/models/half_plus_two
+docker commit --change "ENV MODEL_NAME half_plus_two" serving_base fboylu/tf_serving
+docker push fboylu/tf_serving
+
+nvidia-docker run  -p 8501:8501 -it fboylu/tf_serving
+
