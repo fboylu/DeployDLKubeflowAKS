@@ -1,0 +1,27 @@
+# Environments
+.env
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+
+# Products
+models/
+
+kubeflowapp/
+
+assets/
+
+ks_0.13.1_linux_amd64/
+
+*.h5
+
+*.gz
+
+*.tsv
+
+*.txt
+
+*.pkl
+
+*.jpg
