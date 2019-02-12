@@ -1,2 +1,2 @@
-# DeployDLKubeflowAKS
-Deploying CNNs using Kubelflow on Azure
+# Deploy CNN models using Kubeflow on AKS.
+In this repository, we provide insturctions on how to deploy a Keras CNN model using Kubeflow running on Azure Container Service (AKS).
